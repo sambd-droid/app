@@ -15,7 +15,7 @@ import json
 # If using a service account or headless server, set credentials appropriately.
 
 PROJECT_ID = "pdr-jnu" # Define the project ID
-SERVICE_ACCOUNT_KEY_FILE = "/content/pdr-jnu-61e21aa3f147.json" # Path to your service account key file
+SERVICE_ACCOUNT_KEY_FILE = "pdr-jnu-61e21aa3f147.json" # Path to your service account key file
 
 try:
     # Read the service account email from the JSON key file
