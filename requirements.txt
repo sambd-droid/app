@@ -578,7 +578,7 @@ stanio==0.5.1
 starlette==0.49.3
 statsmodels==0.14.5
 streamlit==1.51.0
-streamlit-folium==0.25.3
+streamlit-folium==0.18.0
 stringzilla==4.2.3
 stumpy==1.13.0
 sympy==1.13.3
