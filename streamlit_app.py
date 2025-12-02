@@ -7,9 +7,9 @@ library(leaflet.extras)
 # ---------------------------
 # Predefined raster paths (server-side)
 # ---------------------------
-ndvi_path <- "data/NDVI.tif"
-b11_path  <- "data/B11.tif"
-lulc_path <- "data/LULC_Sat.tif"
+ndvi_path <- "https://drive.google.com/file/d/1diZpJ19PpM7EasBOMR7mJRmlBsiJNWcm/view?usp=sharing"
+b11_path  <- "https://drive.google.com/file/d/1xlOdC8L10qLvwHz5RDiMIZr990fNbwbs/view?usp=sharing"
+lulc_path <- "https://drive.google.com/file/d/14wb0t7E6IFc6YG14k3erot3ppggV3vlU/view?usp=sharing"
 
 # Load full rasters once at server start
 ndvi_full <- rast(ndvi_path)
