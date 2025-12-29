@@ -1,153 +1,277 @@
+# app.R
 library(shiny)
-library(leaflet)
 library(terra)
-library(sf)
-library(leaflet.extras)
 
-# ---------------------------
-# Predefined raster paths (server-side)
-# ---------------------------
-ndvi_path <- "https://drive.google.com/file/d/1diZpJ19PpM7EasBOMR7mJRmlBsiJNWcm/view?usp=sharing"
-b11_path  <- "https://drive.google.com/file/d/1xlOdC8L10qLvwHz5RDiMIZr990fNbwbs/view?usp=sharing"
-lulc_path <- "https://drive.google.com/file/d/14wb0t7E6IFc6YG14k3erot3ppggV3vlU/view?usp=sharing"
+# Posit-friendly upload limit
+options(shiny.maxRequestSize = 150 * 1024^2)  # 100 MB
 
-# Load full rasters once at server start
-ndvi_full <- rast(ndvi_path)
-b11_full  <- rast(b11_path)
-lulc_full <- rast(lulc_path)
+# ----------------------------------------
+# Helper: pretty bytes
+# ----------------------------------------
+fmt_bytes <- function(b) {
+  if (is.na(b)) return("NA")
+  units <- c("B","KB","MB","GB")
+  p <- pmax(1, floor(log(b, 1024)))
+  sprintf("%.1f %s", b / (1024 ^ (p - 1)), units[p])
+}
 
-# ---------------------------
+# ----------------------------------------
 # UI
-# ---------------------------
+# ----------------------------------------
 ui <- fluidPage(
-  titlePanel("Potential denitrification Calculator"),
+
+  tags$head(
+    tags$style(HTML("\n      .sidebar-panel {background:#df602b; padding: 12px; }\n      .main-panel { padding: 12px;background:#e6ddd6; }\n      .app-title { font-weight: 700; font-size: 30px;color:#df602b; }\n    "))
+  ),
   
+  # App header design
+  div(class = "container",
+      div(class = "row mb-3",
+          div(class = "col-12",
+              span(class = "app-title", "Potential Denitrification Rate Visualization - Manual Model"),br(), hr(),
+             
+          )
+      )
+  ),
+ 
   sidebarLayout(
-    sidebarPanel(
-      h4("Select Your Area on the map"),
-      helpText("Draw a rectangle on the map to define the area for PDR computation."),
-      numericInput("class1", "Intercept for LULC class 1", 0.3983),
-      numericInput("class2", "Intercept for LULC class 2", -0.2820),
-      numericInput("class3", "Intercept for LULC class 3", 0.0437),
-      numericInput("class4", "Intercept for LULC class 4", -0.1599),
-      numericInput("class5", "Intercept for LULC class 5", 0.1230),
-      actionButton("compute", "Compute Dentifrication for Selected Area")
+    sidebarPanel(width = 3,
+                 h4("Upload raster image file."),br(),
+                 fileInput("ndvi", "Upload NDVI.tif", accept = c(".tif", ".tiff")),
+                 fileInput("b11",  "Upload B11.tif",  accept = c(".tif", ".tiff")),
+                 fileInput("lulc", "Upload LULC_Sat.tif", accept = c(".tif", ".tiff")),
+             
+                 actionButton("run", "Run Model", class = "btn-primary",style="color:black;background:#78cee1;"),
+                 hr(),downloadButton("download_plot", "Download Plot (PNG)"),hr(),
+
+                 downloadButton("download_csv", "Download PDR CSV"),
+   
+                 hr(),
+                 verbatimTextOutput("status_small")
     ),
-    
-    mainPanel(
-      leafletOutput("map", height = 500),
-      plotOutput("pdr_plot", height = 300),
-      plotOutput("pdr_hist", height = 300)
+    mainPanel(width = 9,
+              tabsetPanel(
+                tabPanel("Plots",
+                         fluidRow(
+                           column(6, plotOutput("pdr_plot", height = 300)),
+                           column(6, plotOutput("pdr_hist", height = 300))
+                         ),
+                         fluidRow(
+                           column(12, verbatimTextOutput("stats"))
+                         )
+                ),
+                tabPanel("Logs / Info",
+                         verbatimTextOutput("log_text")
+                )
+              )
     )
   )
 )
 
-# ---------------------------
-# ---------------------------
+# ----------------------------------------
+# SERVER
+# ----------------------------------------
 server <- function(input, output, session) {
   
-  # Initialize leaflet map(for initialize viewing map)
-  output$map <- renderLeaflet({
-    leaflet() %>% addTiles() %>%
-      setView(lng = 90.3563, lat = 23.6850, zoom = 7) %>%
-      addDrawToolbar(
-        targetGroup = "draw",
-        rectangleOptions = drawRectangleOptions(shapeOptions = drawShapeOptions(color = "red")),
-        editOptions = editToolbarOptions()
+  result_rast <- reactiveVal(NULL)
+  last_info   <- reactiveVal(NULL)
+  log_lines   <- reactiveVal(character())
+  
+  add_log <- function(txt) {
+    log_lines(c(log_lines(), paste0("[", format(Sys.time(), "%H:%M:%S"), "] ", txt)))
+  }
+  
+  observeEvent(input$run, {
+    
+    result_rast(NULL)
+    last_info(NULL)
+    log_lines(character())
+    
+    # ---- Validation ----
+    if (is.null(input$ndvi) || is.null(input$b11) || is.null(input$lulc)) {
+      showNotification("Please upload NDVI, B11, and LULC rasters.", type = "error")
+      return(NULL)
+    }
+    
+    withProgress(message = "Running PDR model...", value = 0, {
+      
+      # ---- File paths ----
+      ndvi_path <- input$ndvi$datapath
+      b11_path  <- input$b11$datapath
+      lulc_path <- input$lulc$datapath
+      
+      # ---- File sizes ----
+      finfo <- list(
+        ndvi_size = file.info(ndvi_path)$size,
+        b11_size  = file.info(b11_path)$size,
+        lulc_size = file.info(lulc_path)$size
       )
+      last_info(finfo)
+      
+      add_log("Files uploaded successfully")
+      incProgress(0.3, detail = "Files uploaded successfully")
+      
+      # ---- Load rasters ----
+      ndvi <- rast(ndvi_path)
+      b11  <- rast(b11_path)
+      lulc <- rast(lulc_path)
+      
+      add_log("Rasters loaded")
+      
+      
+      # ---- Downscale if large ----
+      downscale_factor <- 1L
+      if (any(unlist(finfo) > 80 * 1024^2, na.rm = TRUE)) {
+        downscale_factor <- 2L
+      }
+      
+      if (downscale_factor > 1) {
+        add_log("Downscaling rasters by factor 2 (memory safety)")
+        ndvi <- aggregate(ndvi, fact = 2, fun = "mean",
+                          filename = tempfile(fileext = ".tif"), overwrite = TRUE)
+        b11  <- aggregate(b11,  fact = 2, fun = "mean",
+                          filename = tempfile(fileext = ".tif"), overwrite = TRUE)
+        
+      }
+      
+      # ---- CRS alignment ----
+      if (!crs(ndvi) == crs(b11)) {
+        add_log("Reprojecting B11 to NDVI CRS")
+        b11 <- project(b11, ndvi, method = "bilinear")
+      }
+      if (!crs(ndvi) == crs(lulc)) {
+        add_log("Reprojecting LULC to NDVI CRS")
+        lulc <- project(lulc, ndvi, method = "near")
+      }
+      incProgress(0.1, detail = "Reprojecting LULC to NDVI")
+      
+      # ---- Resample ----
+      b11  <- resample(b11, ndvi, method = "bilinear",
+                       filename = tempfile(fileext = ".tif"), overwrite = TRUE)
+      lulc <- resample(lulc, ndvi, method = "near",
+                       filename = tempfile(fileext = ".tif"), overwrite = TRUE)
+      
+      add_log("Resampling completed")
+     
+      
+      # ---- LULC intercepts ----
+      rcl <- matrix(c(
+        1,  0.3983,
+        2, -0.2820,
+        3,  0.0437,
+        4, -0.1599,
+        5,  0.1230
+      ), ncol = 2, byrow = TRUE)
+      
+      intc <- classify(lulc, rcl, others = NA,
+                       filename = tempfile(fileext = ".tif"), overwrite = TRUE)
+      
+      add_log("LULC intercepts applied")
+      incProgress(0.2, detail = "LULC intercepts applied")
+      
+      # ---- PDR computation ----
+      exp_term <- (-1.357) + intc + 1.264 * ndvi - 2.271 * b11
+      
+      pdr <- writeRaster(
+        240 * (10 ^ exp_term),
+        filename = tempfile(fileext = ".tif"),
+        overwrite = TRUE
+      )
+      incProgress(0.2, detail = "Applying PDR Formula")
+      
+      pdr <- mask(pdr, ndvi,
+                  filename = tempfile(fileext = ".tif"), overwrite = TRUE)
+      
+      add_log("PDR computation finished")
+      incProgress(0.2, detail = "PDR computation finished")
+      
+      result_rast(pdr)
+      add_log("Model completed successfully")
+    })
   })
   
-  # user Reactive: user-drawn area on demand on leaflet map
-  aoi <- reactiveVal(NULL)
-  
-  # Capture draw events(when someone draw a polygon)
-  observeEvent(input$map_draw_new_feature, {
-    feat <- input$map_draw_new_feature
-    coords <- feat$geometry$coordinates[[1]]
-    # Create sf polygon(its a geometry format)
-    poly <- st_polygon(list(do.call(rbind, lapply(coords, function(x) c(x[[1]], x[[2]]))))) %>%
-      st_sfc(crs = 4326)
-    aoi(poly)
+  # ----------------------------------------
+  # Outputs
+  # ----------------------------------------
+  output$status_small <- renderText({
+    fi <- last_info()
+    if (is.null(fi)) return("No files uploaded yet.")
+    paste0(
+      "NDVI size: ", fmt_bytes(fi$ndvi_size), "\n",
+      "B11 size:  ", fmt_bytes(fi$b11_size),  "\n",
+      "LULC size: ", fmt_bytes(fi$lulc_size), "\n",
+      "Large rasters are auto-downscaled for memory safety."
+    )
   })
   
-  # Compute PDR on AOI
-  observeEvent(input$compute, {
-    req(aoi())
-    poly <- st_transform(aoi(), crs(ndvi_full))  # Transform AOI to raster CRS
-    
-    #this part for pop-up warning
-    # Convert raster extent to sf polygon geometry
-    raster_extent <- st_as_sfc(st_bbox(ndvi_full))
-    
-    # Check intersection for selected area on map
-    if (!st_intersects(poly, raster_extent, sparse = FALSE)[1,1]) {
-      showModal(modalDialog(
-        title = "Warning",
-        "The selected area is outside the raster extent. Please select a valid area.",
-        easyClose = TRUE,
-        footer = NULL
-      ))
+  output$log_text <- renderText({
+    paste(log_lines(), collapse = "\n")
+  })
+  
+  output$pdr_plot <- renderPlot({
+    req(result_rast())
+    plot(result_rast(),
+         main = "Denitrification Rate (mg N2O-N / m² / h)",
+         col = hcl.colors(50, "Viridis"))
+  })
+  
+  output$pdr_hist <- renderPlot({
+    req(result_rast())
+    v <- values(result_rast(), na.rm = TRUE)
+    hist(v, breaks = 50, main = "PDR Distribution", xlab = "PDR")
+  })
+  
+  output$stats <- renderText({
+    req(result_rast())
+    v <- values(result_rast())
+    v <- v[!is.na(v) & is.finite(v)]
+    sprintf(
+      "PDR stats (n=%d): mean=%.3f | sd=%.3f | min=%.3f | max=%.3f",
+      length(v), mean(v), sd(v), min(v), max(v)
+    )
+  })
+  
+  # ---- Downloads ----
+  
+  output$download_plot <- downloadHandler(
+    filename = function() {
+      paste0("PDR_plot_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".png")
+    },
+    content = function(file) {
+      req(result_rast())
       
-      # Reset plots
-      output$pdr_plot <- renderPlot({
-        plot(0, type="n", axes=FALSE, xlab="", ylab="", main="No data in selected area")
-      })
-      output$pdr_hist <- renderPlot({
-        plot(0, type="n", axes=FALSE, xlab="", ylab="", main="No data")
-      })
+      png(
+        filename = file,
+        width = 1200,
+        height = 800,
+        res = 150
+      )
       
-      return()  # stop processing
+      plot(
+        result_rast(),
+        main = "Denitrification Rate (mg N2O-N / m² / h)",
+        col = hcl.colors(50, "Viridis")
+      )
+      
+      dev.off()
     }
-    
-    
-    # Crop rasters to AOI
-    ndvi <- crop(ndvi_full, vect(poly))
-    b11  <- crop(b11_full, vect(poly))
-    lulc <- crop(lulc_full, vect(poly))
-    
-    
-    
-    
-    # Align resolutions / CRS
-    if (!all(ext(ndvi) == ext(lulc)) || !all(res(ndvi) == res(lulc))) {
-      lulc <- resample(lulc, ndvi, method = "near")
+  )
+  
+   
+  
+  output$download_csv <- downloadHandler(
+    filename = function() {
+      paste0("PDR_xy_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
+    },
+    content = function(file) {
+      df <- as.data.frame(result_rast(), xy = TRUE, na.rm = TRUE)
+      write.csv(df, file, row.names = FALSE)
     }
-    if (!all(ext(ndvi) == ext(b11)) || !all(res(ndvi) == res(b11))) {
-      b11 <- resample(b11, ndvi, method = "bilinear")
-    }
-    
-    # LULC intercept raster
-    rcl <- matrix(c(
-      1, input$class1,
-      2, input$class2,
-      3, input$class3,
-      4, input$class4,
-      5, input$class5
-    ), ncol = 2, byrow = TRUE)
-    
-    intc_r <- classify(lulc, rcl, others = NA)
-    
-    # PDR calculation
-    exp_term <- (-1.357) + intc_r + 1.264 * ndvi - 2.271 * b11
-    PDR <- 240 * (10 ^ exp_term)
-    PDR_masked <- mask(PDR, ndvi)
-    
-    # Store reactive PDR
-    output$pdr_plot <- renderPlot({
-      plot(PDR_masked, main = "PDR (Denitrification Rate)", col = hcl.colors(50, "Viridis"))
-    })
-    
-    output$pdr_hist <- renderPlot({
-      hist(values(PDR_masked), main = "PDR Distribution", xlab = "PDR", breaks = 50)
-    })
-    
-    # Optionally, store for download/export
-    session$userData$PDR <- PDR_masked
+  )
+  
+  session$onSessionEnded(function() {
+    gc()
   })
 }
 
-# ---------------------------
-# Run App
-# ---------------------------
-shinyApp(ui = ui, server = server)
-
+shinyApp(ui, server)
